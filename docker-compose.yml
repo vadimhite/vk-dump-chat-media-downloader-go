@@ -1,0 +1,11 @@
+services:
+  downloader:
+    build: .
+    volumes:
+      - .:/workspace
+    environment:
+      ARCHIVE_PATH: /workspace/Archive
+      THRESHOLD_SECONDS: "1.0"
+      JITTER_SECONDS: "0.5"
+      WORKERS: "3"
+      LOG_LEVEL: INFO
