@@ -175,6 +175,8 @@ func writeIndex(path string, chats []chatEntry) error {
 }
 
 const galleryStyle = `<style>
+.sort-bar{padding:8px 0 12px;display:flex;align-items:center;gap:10px;font-size:13px}
+.sort-bar select{font-size:13px;padding:4px 8px;border:1px solid #ccc;border-radius:4px;cursor:pointer}
 .gallery-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;padding:12px 0}
 .gallery-grid a{display:block;overflow:hidden;aspect-ratio:1;background:#000}
 .gallery-grid img{width:100%;height:100%;object-fit:cover;transition:opacity .15s}
@@ -193,22 +195,29 @@ const galleryStyle = `<style>
 
 const galleryScript = `<script>
 (function(){
-  var imgs = window._galleryImgs;
   var cur = 0;
   var lb = document.getElementById('lb');
   var lbImg = document.getElementById('lb-img');
   var lbCounter = document.getElementById('lb-counter');
 
+  function currentImgs(){
+    return Array.from(document.querySelectorAll('.gallery-grid a')).map(function(a){ return a.getAttribute('href'); });
+  }
   function show(i){
+    var imgs = currentImgs();
     cur = (i + imgs.length) % imgs.length;
     lbImg.src = imgs[cur];
     lbCounter.textContent = (cur+1) + ' / ' + imgs.length;
   }
   function open(i){ show(i); lb.classList.add('open'); }
-  function close(){ lb.classList.remove('open'); lbImg.src=''; }
+  function close(){ lb.classList.remove('open'); }
 
-  document.querySelectorAll('.gallery-grid img').forEach(function(img, i){
-    img.parentNode.addEventListener('click', function(e){ e.preventDefault(); open(i); });
+  document.querySelector('.gallery-grid').addEventListener('click', function(e){
+    var link = e.target.closest('a');
+    if(!link) return;
+    e.preventDefault();
+    var links = Array.from(document.querySelectorAll('.gallery-grid a'));
+    open(links.indexOf(link));
   });
   document.getElementById('lb-close').addEventListener('click', close);
   document.getElementById('lb-prev').addEventListener('click', function(){ show(cur-1); });
@@ -220,6 +229,17 @@ const galleryScript = `<script>
     else if(e.key==='ArrowRight') show(cur+1);
     else if(e.key==='Escape') close();
   });
+
+  window.sortGallery = function(order){
+    var grid = document.querySelector('.gallery-grid');
+    var items = Array.from(grid.querySelectorAll('a'));
+    items.sort(function(a, b){
+      var da = a.dataset.date || '';
+      var db = b.dataset.date || '';
+      return order === 'desc' ? db.localeCompare(da) : da.localeCompare(db);
+    });
+    items.forEach(function(el){ grid.appendChild(el); });
+  };
 })();
 </script>`
 
@@ -252,10 +272,22 @@ func writeGallery(path, chatID, chatName string, imgs []string) error {
       <div class="wrap_page_content">
 `, htmlEscape(chatName), galleryStyle, htmlEscape(chatName))
 
+	sb.WriteString(`<div class="sort-bar">
+  <span>Сортировка:</span>
+  <select id="sort-select" onchange="sortGallery(this.value)">
+    <option value="asc">старые сначала</option>
+    <option value="desc">новые сначала</option>
+  </select>
+</div>
+`)
 	sb.WriteString("<div class=\"gallery-grid\">\n")
 	for _, img := range imgs {
 		escaped := htmlEscape(img)
-		fmt.Fprintf(&sb, "  <a href=\"media/%s\"><img src=\"media/%s\" loading=\"lazy\" alt=\"\"></a>\n", escaped, escaped)
+		dateKey := img
+		if len(dateKey) > 15 {
+			dateKey = dateKey[:15]
+		}
+		fmt.Fprintf(&sb, "  <a href=\"media/%s\" data-date=\"%s\"><img src=\"media/%s\" loading=\"lazy\" alt=\"\"></a>\n", escaped, dateKey, escaped)
 	}
 	sb.WriteString("</div>\n")
 
@@ -268,14 +300,6 @@ func writeGallery(path, chatID, chatName string, imgs []string) error {
 </div>
 `)
 
-	sb.WriteString("<script>window._galleryImgs=[")
-	for i, img := range imgs {
-		if i > 0 {
-			sb.WriteByte(',')
-		}
-		fmt.Fprintf(&sb, "%q", "media/"+img)
-	}
-	sb.WriteString("];</script>\n")
 	sb.WriteString(galleryScript)
 
 	sb.WriteString(`      </div>
