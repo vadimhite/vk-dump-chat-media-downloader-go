@@ -9,3 +9,9 @@ services:
       JITTER_SECONDS: "0.5"
       WORKERS: "3"
       LOG_LEVEL: INFO
+
+  gallery-update:
+    build: .
+    entrypoint: ["./gallery", "-archive", "/workspace/Archive"]
+    volumes:
+      - .:/workspace

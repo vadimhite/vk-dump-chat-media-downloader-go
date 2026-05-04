@@ -19,6 +19,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"vk-dump-downloader/internal/gallery"
 )
 
 const defaultUserAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) " +
@@ -527,4 +529,11 @@ func main() {
 		st.chatsSeen.Load(), st.chatsWithMedia.Load(), st.urlsFound.Load(),
 		st.downloaded.Load(), st.skippedExisting.Load(), st.failed.Load(),
 	)
+
+	if st.downloaded.Load() > 0 {
+		logger.infof("regenerating media gallery pages...")
+		if err := gallery.Generate(cfg.archive); err != nil {
+			logger.warnf("gallery generate: %v", err)
+		}
+	}
 }
