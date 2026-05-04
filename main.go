@@ -1,7 +1,6 @@
 package main
 
 import (
-	"crypto/sha1"
 	"flag"
 	"fmt"
 	"io"
@@ -27,6 +26,11 @@ const defaultUserAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) " +
 	"AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
 
 var urlRE = regexp.MustCompile(`https?://[^\s"'<>]*userapi\.com[^\s"'<>]*`)
+
+var (
+	headerRE    = regexp.MustCompile(`class="message__header"[^>]*>([\s\S]*?)</div>`)
+	tsPatternRE = regexp.MustCompile(`(?i)\bat (\d{1,2}:\d{2}:\d{2} (?:am|pm) on \d{1,2} \w+ \d{4})`)
+)
 
 var mediaExtensions = map[string]map[string]bool{
 	"photo": {".jpg": true, ".jpeg": true, ".png": true, ".gif": true, ".webp": true},
@@ -198,8 +202,7 @@ func allowedTypes(typesArg string) map[string]bool {
 	return result
 }
 
-func filenameFor(rawURL string) string {
-	digest := fmt.Sprintf("%x", sha1.Sum([]byte(rawURL)))[:8]
+func filenameFor(rawURL string, ts time.Time) string {
 	u, _ := url.Parse(rawURL)
 	last := path.Base(u.Path)
 	if last == "" || last == "." || last == "/" {
@@ -211,22 +214,50 @@ func filenameFor(rawURL string) string {
 			last += ".jpg"
 		}
 	}
-	return digest + "_" + last
+	if ts.IsZero() {
+		return "00000000_000000_" + last
+	}
+	return ts.UTC().Format("20060102_150405") + "_" + last
 }
 
-func extractURLs(htmlPath string) ([]string, error) {
+type mediaItem struct {
+	url string
+	ts  time.Time // zero if timestamp could not be parsed
+}
+
+func parseVKTimestamp(messageChunk string) time.Time {
+	hm := headerRE.FindStringSubmatch(messageChunk)
+	if hm == nil {
+		return time.Time{}
+	}
+	tm := tsPatternRE.FindStringSubmatch(hm[1])
+	if tm == nil {
+		return time.Time{}
+	}
+	t, err := time.Parse("3:04:05 pm on 2 Jan 2006", strings.ToLower(tm[1]))
+	if err != nil {
+		return time.Time{}
+	}
+	return t
+}
+
+func extractMediaItems(htmlPath string) ([]mediaItem, error) {
 	data, err := os.ReadFile(htmlPath)
 	if err != nil {
 		return nil, err
 	}
-	// VK dumps are windows-1251; URLs are ASCII so byte-level regex is fine
-	matches := urlRE.FindAllString(string(data), -1)
-	seen := make(map[string]bool, len(matches))
-	var result []string
-	for _, m := range matches {
-		if !seen[m] {
-			seen[m] = true
-			result = append(result, m)
+	// VK dumps are windows-1251; URLs and timestamps are ASCII so byte-level ops are fine.
+	// Split by message block boundaries; parts[0] is page header, parts[1:] are per-message chunks.
+	parts := strings.Split(string(data), `<div class="message"`)
+	seen := make(map[string]bool)
+	var result []mediaItem
+	for _, chunk := range parts[1:] {
+		ts := parseVKTimestamp(chunk)
+		for _, u := range urlRE.FindAllString(chunk, -1) {
+			if !seen[u] {
+				seen[u] = true
+				result = append(result, mediaItem{url: u, ts: ts})
+			}
 		}
 	}
 	return result, nil
@@ -267,42 +298,44 @@ func scanChat(chatDir string, cfg config, typesFilter map[string]bool) (*scanRes
 		return res, nil
 	}
 
-	urlSet := make(map[string]bool)
+	itemMap := make(map[string]mediaItem) // url → first-seen item (preserves earliest timestamp)
 	for _, hf := range htmlFiles {
-		urls, err := extractURLs(hf)
+		items, err := extractMediaItems(hf)
 		if err != nil {
 			return nil, fmt.Errorf("reading %s: %w", hf, err)
 		}
-		for _, u := range urls {
-			urlSet[u] = true
+		for _, item := range items {
+			if _, seen := itemMap[item.url]; !seen {
+				itemMap[item.url] = item
+			}
 		}
 	}
 
 	if typesFilter != nil {
-		filtered := make(map[string]bool)
-		for u := range urlSet {
+		filtered := make(map[string]mediaItem)
+		for u, item := range itemMap {
 			if typesFilter[urlMediaType(u)] {
-				filtered[u] = true
+				filtered[u] = item
 			}
 		}
-		urlSet = filtered
+		itemMap = filtered
 	}
 
-	if len(urlSet) == 0 {
+	if len(itemMap) == 0 {
 		return res, nil
 	}
 
 	res.hasMedia = true
 	mediaDir := filepath.Join(chatDir, "media")
 
-	urls := make([]string, 0, len(urlSet))
-	for u := range urlSet {
-		urls = append(urls, u)
+	items := make([]mediaItem, 0, len(itemMap))
+	for _, item := range itemMap {
+		items = append(items, item)
 	}
-	sort.Strings(urls)
+	sort.Slice(items, func(i, j int) bool { return items[i].url < items[j].url })
 
-	for _, u := range urls {
-		dest := filepath.Join(mediaDir, filenameFor(u))
+	for _, item := range items {
+		dest := filepath.Join(mediaDir, filenameFor(item.url, item.ts))
 		if !cfg.force {
 			if fi, statErr := os.Stat(dest); statErr == nil && fi.Size() > 0 {
 				res.skipped++
@@ -311,7 +344,7 @@ func scanChat(chatDir string, cfg config, typesFilter map[string]bool) (*scanRes
 		}
 		res.tasks = append(res.tasks, downloadTask{
 			chatID: filepath.Base(chatDir),
-			url:    u,
+			url:    item.url,
 			dest:   dest,
 		})
 	}
